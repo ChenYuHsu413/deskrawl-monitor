@@ -56,6 +56,7 @@ translate() {  # $1=原文 $2=發布時間 ISO 8601
   body=$(jq -n --arg sys "$SYSTEM_PROMPT" --arg u "$pub"$'\n\n公告原文：\n'"$1" \
     '{systemInstruction: {parts: [{text: $sys}]}, contents: [{role: "user", parts: [{text: $u}]}], generationConfig: {temperature: 0.3}}')
   for i in 1 2; do
+    [[ $i -gt 1 ]] && sleep 15  # 模型忙碌（503）多半是暫時的，稍等再重試
     if res=$(curl -sS --max-time 90 -H "x-goog-api-key: $GEMINI_API_KEY" -H 'Content-Type: application/json' -d "$body" \
         "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"); then
       text=$(jq -r '[.candidates[0].content.parts[]? | select(.thought != true) | .text // empty] | join("")' <<<"$res" 2>/dev/null || true)
