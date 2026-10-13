@@ -17,7 +17,9 @@ notify() {
 }
 
 commit_state() {
-  jq -n --arg b "$1" '{buildid: $b}' > "$STATE_FILE"
+  local cur='{}'
+  [[ -f "$STATE_FILE" ]] && cur=$(cat "$STATE_FILE")
+  jq --arg b "$1" '.buildid = $b' <<<"$cur" > "$STATE_FILE"
   git config user.name "github-actions[bot]"
   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
   git add "$STATE_FILE"

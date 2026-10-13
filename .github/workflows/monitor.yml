@@ -14,6 +14,11 @@ on:
     # 每天 18:07–18:52（台灣）= 10:07–10:52 UTC
     - cron: "7,22,37,52 10 * * *"
   workflow_dispatch:
+    inputs:
+      preview_announce:
+        description: "預覽官方公告翻譯（翻譯最新 2 則並發送，不更新 state.json）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -25,10 +30,21 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Check build ID
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: bash .github/scripts/check.sh
+      # 與 Build ID 監控互相獨立：上一步失敗仍會執行
+      - name: Forward announcements
+        if: ${{ !cancelled() }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          ANNOUNCE_CHANNEL_ID: ${{ secrets.ANNOUNCE_CHANNEL_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          PREVIEW: ${{ inputs.preview_announce == true }}
+        run: bash .github/scripts/announce.sh
