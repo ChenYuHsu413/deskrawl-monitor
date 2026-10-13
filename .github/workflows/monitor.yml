@@ -1,0 +1,34 @@
+name: Monitor Steam Build
+
+on:
+  schedule:
+    # 所有 cron 皆為 UTC；台灣時間 = UTC+8
+    # 每天 06:32、06:42、06:52（台灣）= 前一天 22:32/42/52 UTC
+    - cron: "32,42,52 22 * * *"
+    # 週一到週五 07:07–07:52（台灣）= 週日到週四 23:07–23:52 UTC
+    - cron: "7,22,37,52 23 * * 0-4"
+    # 週一到週五 08:07–15:52（台灣）= 週一到週五 00:07–07:52 UTC
+    - cron: "7,22,37,52 0-7 * * 1-5"
+    # 每天 17:37、17:52（台灣）= 09:37、09:52 UTC
+    - cron: "37,52 9 * * *"
+    # 每天 18:07–18:52（台灣）= 10:07–10:52 UTC
+    - cron: "7,22,37,52 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check build ID
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: bash .github/scripts/check.sh
