@@ -80,9 +80,11 @@ post() {  # $1=標題 $2=內文 $3=發布時間
 }
 
 # 訊息內文：content + embeds 的 title/description（含轉發訊息的 snapshot）
-extract='[.content, (.embeds[]? | .title, .description),
+# 只處理一般訊息（type 0）與回覆（type 19），追蹤頻道等系統訊息視為空內容
+extract='if (.type != 0 and .type != 19) then "" else
+  [.content, (.embeds[]? | .title, .description),
   (.message_snapshots[]?.message | .content, (.embeds[]? | .title, .description))]
-  | map(select(. != null and . != "")) | join("\n\n")'
+  | map(select(. != null and . != "")) | join("\n\n") end'
 
 # 依時間由舊到新排序（snowflake 太大不能轉數字，先比長度再比字串）
 sort_old_first='sort_by((.id | length), .id)'
@@ -113,8 +115,9 @@ process() {  # $1=標題 $2=是否更新狀態
 }
 
 if [[ "${PREVIEW:-false}" == true ]]; then
-  fetch "limit=2"
-  msgs=$(jq "$sort_old_first" <<<"$msgs")
+  fetch "limit=20"
+  msgs=$(jq "map(select(($extract) != \"\")) | $sort_old_first | .[-2:]" <<<"$msgs")
+  [[ $(jq length <<<"$msgs") -eq 0 ]] && echo "頻道內沒有可預覽的公告（系統訊息不算）"
   process "📢 官方公告（預覽）" false
   exit
 fi
