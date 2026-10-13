@@ -81,8 +81,8 @@ GitHub Actions 的 cron 一律是 **UTC**，台灣時間 = UTC+8。目前排程�
 | `ANNOUNCE_CHANNEL_ID` | #官方公告 頻道 ID（Discord 開啟開發者模式 → 對頻道按右鍵 → 複製頻道 ID） |
 | `GEMINI_API_KEY` | Google AI Studio 的 Gemini API key（免費額度即可） |
 
-選用的 Variable（同頁面 → Variables 分頁）：`GEMINI_MODEL`，未設定時預設 `gemini-3.8-flash`。
-若之後該模型下架或免費額度用完，改填其他 Flash 系列模型名稱即可，不用改程式。
+選用的 Variable（同頁面 → Variables 分頁）：`GEMINI_MODEL`，未設定時預設 `gemini-3.5-flash-lite`（免費額度較寬，實測 `gemini-3.8-flash` 在免費額度常回「需求量過高」）。
+若之後該模型下架或額度用完，改填其他 Flash 系列模型名稱即可，不用改程式。
 
 ### Bot 設定
 

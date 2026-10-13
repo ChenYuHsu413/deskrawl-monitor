@@ -5,7 +5,7 @@ set -euo pipefail
 
 STATE_FILE=state.json
 USERNAME="桌面破壞神更新監控"
-MODEL="${GEMINI_MODEL:-gemini-3.8-flash}"
+MODEL="${GEMINI_MODEL:-gemini-3.5-flash-lite}"
 MAX_PER_RUN=5
 
 : "${DISCORD_BOT_TOKEN:?DISCORD_BOT_TOKEN 未設定}"
