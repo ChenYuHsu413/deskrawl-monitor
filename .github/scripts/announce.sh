@@ -7,6 +7,9 @@ STATE_FILE=state.json
 USERNAME="桌面破壞神更新監控"
 MODEL="${GEMINI_MODEL:-gemini-3.5-flash-lite}"
 MAX_PER_RUN=5
+MAX_IMAGES=2
+IMG_MAX_BYTES=$((4 * 1024 * 1024))
+WORK=$(mktemp -d)
 
 : "${DISCORD_BOT_TOKEN:?DISCORD_BOT_TOKEN 未設定}"
 : "${ANNOUNCE_CHANNEL_ID:?ANNOUNCE_CHANNEL_ID 未設定}"
@@ -21,6 +24,7 @@ read -r -d '' SYSTEM_PROMPT <<'PROMPT' || true
 4. 刪除 @everyone、@here，不要產生任何 @ 提及。
 5. 網址原樣保留。
 6. 只輸出翻譯結果，不要加任何說明、前言或程式碼區塊。
+7. 若圖片中有文字（例如更新路線圖、維護時間），請一併翻譯並整理成條列重點；圖片中的日期若無時區，照原文保留並註明「（官方未註明時區）」。
 PROMPT
 
 state=$(cat "$STATE_FILE" 2>/dev/null || echo '{}')
@@ -50,64 +54,109 @@ commit_if_changed() {
   git push -q
 }
 
-translate() {  # $1=原文 $2=發布時間 ISO 8601
-  local pub body res text i
-  pub="發布時間：$(TZ=America/Los_Angeles date -d "$2" '+%Y-%m-%d (%a) %H:%M %Z')，即台灣時間 $(TZ=Asia/Taipei date -d "$2" '+%Y-%m-%d (%a) %H:%M')"
-  body=$(jq -n --arg sys "$SYSTEM_PROMPT" --arg u "$pub"$'\n\n公告原文：\n'"$1" \
-    '{systemInstruction: {parts: [{text: $sys}]}, contents: [{role: "user", parts: [{text: $u}]}], generationConfig: {temperature: 0.3}}')
+# 下載圖片（最多 MAX_IMAGES 張，超過 4MB 略過），成功的寫入 $WORK/imgN.b64 與 $WORK/imgN.mime
+# stdout 輸出成功的編號，log 走 stderr
+download_images() {  # $@=圖片網址
+  local k=0 url mime
+  rm -f "$WORK"/img*
+  for url in "$@"; do
+    k=$((k + 1))
+    if ! mime=$(curl -fsSL --max-time 30 --max-filesize "$IMG_MAX_BYTES" -o "$WORK/img$k" -w '%{content_type}' "$url"); then
+      echo "  圖片 $k 下載失敗或超過 4MB，略過" >&2; continue
+    fi
+    mime=${mime%%;*}
+    if (($(stat -c%s "$WORK/img$k") > IMG_MAX_BYTES)); then
+      echo "  圖片 $k 超過 4MB，略過" >&2; continue
+    fi
+    if [[ "$mime" != image/* ]]; then
+      echo "  圖片 $k 類型為 ${mime:-未知}，略過" >&2; continue
+    fi
+    base64 -w0 "$WORK/img$k" > "$WORK/img$k.b64"
+    printf '%s' "$mime" > "$WORK/img$k.mime"
+    echo "  圖片 $k（$mime，$(stat -c%s "$WORK/img$k") bytes）送翻譯" >&2
+    echo "$k"
+  done
+}
+
+translate() {  # $1=原文 $2=發布時間 ISO 8601 $3...=已下載圖片編號
+  local text=$1 ts=$2 pub user res code out i k
+  shift 2
+  pub="發布時間：$(TZ=America/Los_Angeles date -d "$ts" '+%Y-%m-%d (%a) %H:%M %Z')，即台灣時間 $(TZ=Asia/Taipei date -d "$ts" '+%Y-%m-%d (%a) %H:%M')"
+  user="$pub"$'\n\n公告原文：\n'"${text:-（本則公告只有圖片）}"
+  jq -n --arg sys "$SYSTEM_PROMPT" --arg u "$user" \
+    '{systemInstruction: {parts: [{text: $sys}]}, contents: [{role: "user", parts: [{text: $u}]}], generationConfig: {temperature: 0.3}}' \
+    > "$WORK/body.json"
+  # base64 可能很大，用檔案傳給 jq 避免超過命令列長度限制
+  for k in "$@"; do
+    jq --rawfile d "$WORK/img$k.b64" --rawfile m "$WORK/img$k.mime" \
+      '.contents[0].parts += [{inline_data: {mime_type: $m, data: $d}}]' "$WORK/body.json" > "$WORK/body.tmp"
+    mv "$WORK/body.tmp" "$WORK/body.json"
+  done
   for i in 1 2; do
     [[ $i -gt 1 ]] && sleep 15  # 模型忙碌（503）多半是暫時的，稍等再重試
-    if res=$(curl -sS --max-time 90 -H "x-goog-api-key: $GEMINI_API_KEY" -H 'Content-Type: application/json' -d "$body" \
-        "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent"); then
-      text=$(jq -r '[.candidates[0].content.parts[]? | select(.thought != true) | .text // empty] | join("")' <<<"$res" 2>/dev/null || true)
-      if [[ -n "$text" ]]; then printf '%s' "$text"; return 0; fi
-      echo "Gemini 第 $i 次失敗：$(jq -r '.error.message // "無翻譯內容"' <<<"$res" 2>/dev/null || echo "回應無法解析")" >&2
-    else
-      echo "Gemini 第 $i 次連線失敗" >&2
-    fi
+    code=$(curl -sS --max-time 90 -o "$WORK/res.json" -w '%{http_code}' \
+      -H "x-goog-api-key: $GEMINI_API_KEY" -H 'Content-Type: application/json' -d @"$WORK/body.json" \
+      "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent") || code=000
+    out=$(jq -r '[.candidates[0].content.parts[]? | select(.thought != true) | .text // empty] | join("")' "$WORK/res.json" 2>/dev/null || true)
+    if [[ "$code" == 200 && -n "$out" ]]; then printf '%s' "$out"; return 0; fi
+    echo "  Gemini（$MODEL）第 $i 次失敗：HTTP $code $(jq -r '.error.message // "無翻譯內容"' "$WORK/res.json" 2>/dev/null || echo "連線失敗或回應無法解析")" >&2
   done
   return 1
 }
 
-post() {  # $1=標題 $2=內文 $3=發布時間
+post() {  # $1=標題 $2=內文 $3=發布時間 $4=原圖網址（可空）
   local footer="原文發布：$(TZ=Asia/Taipei date -d "$3" '+%Y-%m-%d %H:%M')（台灣時間）"
-  jq -n --arg u "$USERNAME" --arg t "$1" --arg d "$2" --arg f "$footer" '{
+  jq -n --arg u "$USERNAME" --arg t "$1" --arg d "$2" --arg f "$footer" --arg img "${4:-}" '{
       username: $u,
       allowed_mentions: {parse: []},
-      embeds: [{title: $t, description: (if ($d | length) > 3500 then $d[0:3500] + "…" else $d end), footer: {text: $f}}]
+      embeds: [{title: $t, description: (if ($d | length) > 3500 then $d[0:3500] + "…" else $d end), footer: {text: $f}}
+        + (if $img != "" then {image: {url: $img}} else {} end)]
     }' |
     curl -fsS --retry 3 --max-time 20 -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK_URL" >/dev/null
 }
 
-# 訊息內文：content + embeds 的 title/description（含轉發訊息的 snapshot）
 # 只處理一般訊息（type 0）與回覆（type 19），追蹤頻道等系統訊息視為空內容
-extract='if (.type != 0 and .type != 19) then "" else
-  [.content, (.embeds[]? | .title, .description),
-  (.message_snapshots[]?.message | .content, (.embeds[]? | .title, .description))]
-  | map(select(. != null and . != "")) | join("\n\n") end'
+# 本體與轉發訊息的 snapshot 一起看
+sources='if (.type != 0 and .type != 19) then empty else (., .message_snapshots[]?.message) end'
+
+# 訊息內文：content + embeds 的 title/description
+extract="[$sources | .content, (.embeds[]? | .title, .description)]
+  | map(select(. != null and . != \"\")) | join(\"\\n\\n\")"
+
+# 圖片網址：attachments 中 image/*，以及 embed 的 image/thumbnail
+images="[$sources | (.attachments[]? | select((.content_type // \"\") | startswith(\"image/\")) | .url),
+  (.embeds[]? | .image.url, .thumbnail.url)] | map(select(. != null))"
+
+# log 用：type、flags、是否轉發（message_reference.type 1 或有 snapshot）、是否追蹤轉來（IS_CROSSPOST 或 webhook）
+describe='"type=\(.type) flags=\(.flags // 0) 轉發=\(if .message_reference.type == 1 or ((.message_snapshots // []) | length > 0) then "是" else "否" end) 追蹤=\(if (((.flags // 0) / 2 | floor) % 2 == 1) or .webhook_id != null then "是" else "否" end)"'
 
 # 依時間由舊到新排序（snowflake 太大不能轉數字，先比長度再比字串）
 sort_old_first='sort_by((.id | length), .id)'
 
 process() {  # $1=標題 $2=是否更新狀態
-  local n i id ts text out
+  local n i msg id ts text out img_urls ok_imgs first_img
   n=$(jq 'length' <<<"$msgs")
   for ((i = 0; i < n; i++)); do
-    id=$(jq -r ".[$i].id" <<<"$msgs")
-    ts=$(jq -r ".[$i].timestamp" <<<"$msgs")
-    text=$(jq -r ".[$i] | $extract" <<<"$msgs" | sed -E 's/@(everyone|here)//g')
-    if [[ -z "${text//[[:space:]]/}" ]]; then
-      echo "訊息 $id 內容為空，跳過"
+    msg=$(jq -c ".[$i]" <<<"$msgs")
+    id=$(jq -r '.id' <<<"$msg")
+    ts=$(jq -r '.timestamp' <<<"$msg")
+    text=$(jq -r "$extract" <<<"$msg" | sed -E 's/@(everyone|here)//g')
+    mapfile -t img_urls < <(jq -r "$images | .[0:$MAX_IMAGES][]" <<<"$msg")
+    echo "訊息 $id $(jq -r "$describe" <<<"$msg") 圖片=${#img_urls[@]} 內容：$(jq -rn --arg t "$text" '$t | gsub("\\s+"; " ") | .[0:50]')"
+    if [[ -z "${text//[[:space:]]/}" && ${#img_urls[@]} -eq 0 ]]; then
+      echo "  → 跳過：沒有文字也沒有圖片（系統訊息或空訊息）"
     else
-      if ! out=$(translate "$text" "$ts"); then
+      mapfile -t ok_imgs < <(download_images "${img_urls[@]}")
+      first_img=${img_urls[0]:-}
+      if ! out=$(translate "$text" "$ts" "${ok_imgs[@]}"); then
         out="（翻譯失敗，以下為原文）"$'\n'"$text"
       fi
       out=$(sed -E 's/@(everyone|here)//g' <<<"$out")
-      if ! post "$1" "$out" "$ts"; then
+      if ! post "$1" "$out" "$ts" "$first_img"; then
         echo "::error::推播訊息 $id 失敗"
         return 1
       fi
-      echo "已轉發訊息 $id"
+      echo "  → 已翻譯轉發"
     fi
     [[ "$2" == true ]] && save_state "$id"
   done
@@ -116,7 +165,7 @@ process() {  # $1=標題 $2=是否更新狀態
 
 if [[ "${PREVIEW:-false}" == true ]]; then
   fetch "limit=20"
-  msgs=$(jq "map(select(($extract) != \"\")) | $sort_old_first | .[-2:]" <<<"$msgs")
+  msgs=$(jq "map(select(($extract) != \"\" or ($images | length) > 0)) | $sort_old_first | .[-2:]" <<<"$msgs")
   [[ $(jq length <<<"$msgs") -eq 0 ]] && echo "頻道內沒有可預覽的公告（系統訊息不算）"
   process "📢 官方公告（預覽）" false
   exit
@@ -134,7 +183,7 @@ fi
 
 fetch "after=${last}&limit=20"
 msgs=$(jq "$sort_old_first | .[0:$MAX_PER_RUN]" <<<"$msgs")
-echo "新訊息 $(jq length <<<"$msgs") 則"
+echo "last_announce_msg_id=$last，新訊息 $(jq length <<<"$msgs") 則"
 rc=0
 process "📢 官方公告" true || rc=1
 commit_if_changed "announce -> $(jq -r '.last_announce_msg_id' "$STATE_FILE")"

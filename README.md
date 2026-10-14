@@ -100,6 +100,9 @@ GitHub Actions 的 cron 一律是 **UTC**，台灣時間 = UTC+8。目前排程�
 - 每則推播成功才更新 `last_announce_msg_id`；推播失敗會讓這個步驟失敗，下次從失敗那則重試。
 - Gemini 翻譯失敗會重試 1 次，仍失敗就改發原文（前面加「（翻譯失敗，以下為原文）」）。
 - 讀取 Discord 頻道失敗只會在 log 記錯誤，不會發通知。
+- 支援 Discord「轉發」的訊息（內容在 `message_snapshots`）與追蹤功能轉來的訊息；系統訊息（例如追蹤頻道的提示）會跳過。
+- 圖片公告：訊息（含轉發內容、embed）中的圖片最多取 2 張、每張超過 4MB 略過，連同文字送給 Gemini 翻譯圖中文字；通知的 embed 會附上原圖。
+- log 會列出每則訊息的 ID、type、flags、是否轉發、內容前 50 字與處理結果；Gemini 失敗時會印出 HTTP 狀態碼與錯誤訊息。
 - 發送時設定 `allowed_mentions: {"parse": []}`，並移除 `@everyone`、`@here`，不會 @ 到任何人。
 
 ### 預覽翻譯效果
