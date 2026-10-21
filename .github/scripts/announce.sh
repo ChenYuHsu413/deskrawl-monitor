@@ -33,13 +33,15 @@ read -r -d '' SYSTEM_PROMPT <<'PROMPT' || true
 翻譯規則：
 1. 意譯為主，使用自然的台灣用語，不要逐字直譯。
 2. 必須遵守下方術語表。術語表只在該詞作為遊戲專有名詞時套用；一般英文用法（例如 grand prize、top tier、boss fight 的一般敘述）照正常語意翻譯。
-3. 術語表裡已有的詞直接用中文譯名，不要再加英文括號。只有術語表沒有的遊戲專有名詞，才譯成中文後在括號附上英文原文，格式為「中文（English）」，例如「狼人毛皮（Werewolf Pelts）」；不確定怎麼翻的就保留英文。
-4. 日期時間一律換算成台灣時間（UTC+8），格式如「10/13（二）08:00–10:00」。美國太平洋時間要依日期判斷是 PDT（UTC-7）還是 PST（UTC-8）；文字中沒寫時區的時間視為美國太平洋時間。tomorrow、tonight、next week 等相對時間依「發布時間」推算。
-5. 公告提到需要更新遊戲（update the client/game、patch、restart Steam 等）時，第一行加上「⚠️ 需要更新遊戲」。
-6. 圖片中有文字（例如更新路線圖、維護時間）時，一併翻譯並整理成條列重點；圖片中的日期沒有時區時，照原文保留並註明「（官方未註明時區）」。
-7. 結尾的客套語（Cheers!、Have fun!、Thanks! 等）譯成自然的「祝遊戲愉快！」或直接省略，不要譯成「加油！」。
-8. 移除 @everyone、@here，不要產生任何 @ 提及；網址原樣保留。
-9. 只輸出翻譯結果，不要加任何說明、前言或程式碼區塊。
+3. 術語表裡已有的詞直接用中文譯名，不加星號、不加英文括號。術語表沒有的遊戲專有名詞（裝備名、技能名、狀態效果名等），譯成中文後在中文名稱後面加「*」，再附英文原文，格式為「中文*（English）」，例如「鐵暴君頭盔*（Iron Tyrant's Helm）」；不確定怎麼翻的就保留英文。
+4. 只要譯文中出現至少一個「*」，就在譯文最後另起一行加上「* 暫定譯名，遊戲內名稱可能不同」；沒有就不加。
+5. 數值寫法：原文的「+X%」照原樣保留為「+X%」；「X% more」譯成「增加 X%」，不要混用。
+6. 日期時間一律換算成台灣時間（UTC+8），格式如「10/13（二）08:00–10:00」。美國太平洋時間要依日期判斷是 PDT（UTC-7）還是 PST（UTC-8）；文字中沒寫時區的時間視為美國太平洋時間。tomorrow、tonight、next week 等相對時間依「發布時間」推算。
+7. 公告提到需要更新遊戲（update the client/game、patch、restart Steam 等）時，第一行加上「⚠️ 需要更新遊戲」。
+8. 圖片中有文字（例如更新路線圖、維護時間、裝備說明）時，一併翻譯並整理成條列重點，職業限制和小字的效果說明也要翻譯，不要省略；圖片中的日期沒有時區時，照原文保留並註明「（官方未註明時區）」。
+9. 結尾的客套語（Cheers!、Have fun!、Thanks! 等）譯成自然的「祝遊戲愉快！」或直接省略，不要譯成「加油！」。
+10. 移除 @everyone、@here，不要產生任何 @ 提及；網址原樣保留。
+11. 只輸出翻譯結果，不要加任何說明、前言或程式碼區塊。
 
 術語表（英文 → 中文譯名）：
 PROMPT
@@ -78,7 +80,11 @@ ensure_im() {
   [[ -n "$IM" || -f "$WORK/im_install_tried" ]] && return 0
   touch "$WORK/im_install_tried"
   echo "  找不到 ImageMagick，安裝中（apt-get install imagemagick）" >&2
-  if sudo apt-get install -y --no-install-recommends imagemagick > "$WORK/apt.log" 2>&1; then
+  # 第一次失敗多半是套件清單過期，update 後再試一次
+  if sudo apt-get install -y --no-install-recommends imagemagick > "$WORK/apt.log" 2>&1 ||
+    { echo "  安裝失敗，執行 apt-get update 後重試" >&2
+      sudo apt-get update > "$WORK/apt.log" 2>&1 &&
+      sudo apt-get install -y --no-install-recommends imagemagick > "$WORK/apt.log" 2>&1; }; then
     IM=$(command -v magick || command -v convert || true)
     echo "  ImageMagick 安裝完成：${IM:-安裝後仍找不到指令}" >&2
   else
@@ -220,14 +226,16 @@ post() {  # $1=標題 $2=內文 $3=發布時間 $4=原圖網址（可空）$5=�
       echo "  預覽發送到主 Webhook"
     fi
   fi
-  jq -n --arg u "$user" --arg t "$1" --arg d "$desc" --arg f "$footer" --arg img "${4:-}" --argjson c "$color" --argjson fl "$flags" '{
+  local payload
+  payload=$(jq -n --arg u "$user" --arg t "$1" --arg d "$desc" --arg f "$footer" --arg img "${4:-}" --argjson c "$color" --argjson fl "$flags" '{
       username: $u,
       allowed_mentions: {parse: []},
       embeds: [{title: $t, description: (if ($d | length) > 3500 then $d[0:3500] + "…" else $d end), footer: {text: $f}}
         + (if $img != "" then {image: {url: $img}} else {} end)
         + (if $c != null then {color: $c} else {} end)]
-    } + (if $fl != null then {flags: $fl} else {} end)' |
-    curl -fsS --retry 3 --max-time 20 -H 'Content-Type: application/json' -d @- "$webhook" >/dev/null
+    } + (if $fl != null then {flags: $fl} else {} end)')
+  [[ "$is_preview" == true ]] && echo "  靜音發送：$(jq -r 'if .flags == 4096 then "是" else "否" end' <<<"$payload")"
+  curl -fsS --retry 3 --max-time 20 -H 'Content-Type: application/json' -d @- "$webhook" <<<"$payload" >/dev/null
 }
 
 # 只處理一般訊息（type 0）與回覆（type 19），追蹤頻道等系統訊息視為空內容
@@ -259,7 +267,8 @@ forward() {  # $1=標題 $2=原文 $3=發布時間 $4...=圖片網址
   else
     out="（翻譯失敗，以下為原文）"$'\n'"$text"
   fi
-  out=$(sed -E 's/@(everyone|here)//g' <<<"$out")
+  # 暫定譯名的「*」要跳脫，否則兩個星號之間會被 Discord 當成斜體
+  out=$(sed -E -e 's/@(everyone|here)//g' -e 's/[*](（|[(])/\\*\1/g' -e 's/^[*] 暫定譯名/\\* 暫定譯名/' <<<"$out")
   post "$title" "$out" "$ts" "${1:-}" "$provider" || return 1
   echo "  → 已轉發（翻譯：${provider:-失敗，發原文}）"
 }
