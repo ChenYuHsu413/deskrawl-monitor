@@ -77,6 +77,7 @@ GitHub Actions 的 cron 一律是 **UTC**，台灣時間 = UTC+8。目前排程�
 | 名稱 | 說明 |
 | --- | --- |
 | `DISCORD_WEBHOOK_URL` | 通知頻道的 Webhook（與 Build ID 監控共用） |
+| `DISCORD_TEST_WEBHOOK_URL` | 選用：預覽（測試訊息）專用的 Webhook，見「預覽翻譯效果」 |
 | `DISCORD_BOT_TOKEN` | 自己的 Discord Bot token |
 | `ANNOUNCE_CHANNEL_ID` | #官方公告 頻道 ID（Discord 開啟開發者模式 → 對頻道按右鍵 → 複製頻道 ID） |
 | `ANTHROPIC_API_KEY` | Claude API key（[Claude Console](https://console.anthropic.com/) → API Keys），主要翻譯供應商 |
@@ -108,7 +109,8 @@ repo 根目錄的 `glossary.json` 是 `{"英文術語": "中文譯名"}` 格式�
 - 新增或修改譯名：直接編輯檔案並 commit，下次執行就生效。
 - 同一個詞的單複數或大小寫寫法差很多時（例如 `minion` / `minions`），可以各列一筆。
 - 必須是合法 JSON（最後一筆後面不能有逗號），格式錯誤會讓公告轉發步驟失敗；可用 `jq . glossary.json` 檢查。
-- 術語表沒有的專有名詞，模型會譯成中文並在括號附英文原文，例如「韁繩（Reins）」；看到翻得不好的就補進術語表。
+- 術語表已有的詞直接用中文；術語表沒有的專有名詞，模型會譯成中文並在括號附英文原文，例如「狼人毛皮（Werewolf Pelts）」。看到翻得不好的就補進術語表。
+- 術語表只在該詞作為遊戲專有名詞時套用。避免放 `Boss`、`Tier` 這類一般英文也常用的單字（會誤套到 boss fight、top tier），改放完整片語，例如 `Boss materials`、`World Boss`。
 
 ### Bot 設定
 
@@ -127,14 +129,23 @@ repo 根目錄的 `glossary.json` 是 `{"英文術語": "中文譯名"}` 格式�
 - 翻譯失敗的處理見上方「翻譯供應商順序」。
 - 讀取 Discord 頻道失敗只會在 log 記錯誤，不會發通知。
 - 支援 Discord「轉發」的訊息（內容在 `message_snapshots`）與追蹤功能轉來的訊息；系統訊息（例如追蹤頻道的提示）會跳過。
-- 圖片公告：訊息（含轉發內容、embed）中的圖片最多取 2 張、每張超過 4MB 略過，連同文字送給翻譯模型翻譯圖中文字；通知的 embed 會附上原圖。
+- 圖片公告：訊息（含轉發內容、embed）中的圖片最多取 2 張，連同文字送給翻譯模型翻譯圖中文字；通知的 embed 會附上原圖網址。
+  - 送出前用 runner 內建的 ImageMagick 把長邊超過 1500px 的圖縮到 1500px（不放大），一律轉成 JPEG（品質 85，GIF 只取第一格）；找不到 ImageMagick 就照原圖送。
+  - base64 編碼後超過 4.5MB 的圖片略過。log 會記錄原始尺寸、縮圖後尺寸與 base64 大小。
 - log 會列出每則訊息的 ID、type、flags、是否轉發、內容前 50 字與處理結果；Claude／Gemini 失敗時會印出 HTTP 狀態碼與錯誤訊息（不會印出 key）。
 - 發送時設定 `allowed_mentions: {"parse": []}`，並移除 `@everyone`、`@here`，不會 @ 到任何人。
 
 ### 預覽翻譯效果
 
-Actions → **Monitor Steam Build** → **Run workflow** → 勾選 **preview_announce** → **Run workflow**。
-會把 #官方公告 最新 2 則翻譯後以「📢 官方公告（預覽）」發送，**不會**更新 `state.json`。
+Actions → **Monitor Steam Build** → **Run workflow**，依需求填：
 
-要測試特定文字的翻譯效果：**Run workflow** → 在 **preview_text** 貼上英文原文 → **Run workflow**。
-只會翻譯這段文字並以「📢 官方公告（預覽）」發送，不讀頻道、不更新 `state.json`（發布時間以執行當下計算）。
+| 輸入 | 說明 |
+| --- | --- |
+| **preview_announce** | 勾選後翻譯 #官方公告 最新 2 則 |
+| **preview_message_id** | 搭配 preview_announce，只預覽這一則（Discord 開發者模式 → 對訊息按右鍵 → 複製訊息 ID） |
+| **preview_text** | 有填就只翻譯這段英文，不讀頻道（發布時間以執行當下計算） |
+| **preview_target** | `test`（預設）：發到 `DISCORD_TEST_WEBHOOK_URL`，未設定則發到主 Webhook；`main`：強制發到主 Webhook |
+
+預覽**不會**更新 `state.json`，且一律以測試格式發送，與正式公告區分：
+標題「🧪 測試訊息（請忽略）」、灰色 embed、內文第一行「⚠️ 這是測試翻譯，不是新的官方公告」、發送者名稱「桌面破壞神更新監控（測試）」。
+正式公告的格式不受影響。

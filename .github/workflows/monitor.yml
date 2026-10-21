@@ -16,13 +16,22 @@ on:
   workflow_dispatch:
     inputs:
       preview_announce:
-        description: "預覽官方公告翻譯（翻譯最新 2 則並發送，不更新 state.json）"
+        description: "預覽官方公告翻譯（翻譯最新 2 則或 preview_message_id 指定的那則並發送，不更新 state.json）"
         type: boolean
         default: false
+      preview_message_id:
+        description: "搭配 preview_announce：只預覽這個 Discord 訊息 ID（空白則取最新 2 則）"
+        type: string
+        default: ""
       preview_text:
         description: "預覽翻譯指定文字（有填就只翻這段並發送，不讀頻道、不更新 state.json）"
         type: string
         default: ""
+      preview_target:
+        description: "預覽發送目標：test＝DISCORD_TEST_WEBHOOK_URL（未設定則用主 Webhook），main＝主 Webhook"
+        type: choice
+        options: [test, main]
+        default: test
 
 permissions:
   contents: write
@@ -54,4 +63,7 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           PREVIEW: ${{ inputs.preview_announce == true }}
           PREVIEW_TEXT: ${{ inputs.preview_text }}
+          PREVIEW_MESSAGE_ID: ${{ inputs.preview_message_id }}
+          PREVIEW_TARGET: ${{ inputs.preview_target }}
+          DISCORD_TEST_WEBHOOK_URL: ${{ secrets.DISCORD_TEST_WEBHOOK_URL }}
         run: bash .github/scripts/announce.sh

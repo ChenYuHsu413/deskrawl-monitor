@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 讀取 #官方公告 的新訊息，翻成繁體中文後透過 Webhook 轉發（Claude 優先，失敗改用 Gemini）。
-# PREVIEW=true 時翻譯最新 2 則並以預覽標題發送，不更新 state.json。
-# PREVIEW_TEXT 有值時只翻譯這段文字並以預覽標題發送，不讀頻道、不更新 state.json。
+# PREVIEW=true 時翻譯最新 2 則（或 PREVIEW_MESSAGE_ID 指定的那則）並以測試格式發送，不更新 state.json。
+# PREVIEW_TEXT 有值時只翻譯這段文字並以測試格式發送，不讀頻道、不更新 state.json。
+# 預覽依 PREVIEW_TARGET：test 發到 DISCORD_TEST_WEBHOOK_URL（未設定退回主 Webhook），main 發到主 Webhook。
 set -euo pipefail
 
 STATE_FILE=state.json
@@ -11,8 +12,14 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-5-5}"
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.5-flash-lite}"
 MAX_PER_RUN=5
 MAX_IMAGES=2
-IMG_MAX_BYTES=$((4 * 1024 * 1024))
+DOWNLOAD_MAX_BYTES=$((20 * 1024 * 1024))
+B64_MAX_BYTES=$((4608 * 1024))  # 4.5MB，以 base64 編碼後計算
+IMG_MAX_SIDE=1500
+PREVIEW_TITLE="🧪 測試訊息（請忽略）"
+PREVIEW_COLOR=$((0x95A5A6))
+is_preview=false
 WORK=$(mktemp -d)
+IM=$(command -v magick || command -v convert || true)
 
 : "${DISCORD_WEBHOOK_URL:?DISCORD_WEBHOOK_URL 未設定}"
 
@@ -25,12 +32,14 @@ read -r -d '' SYSTEM_PROMPT <<'PROMPT' || true
 
 翻譯規則：
 1. 意譯為主，使用自然的台灣用語，不要逐字直譯。
-2. 必須遵守下方術語表。術語表沒有的遊戲專有名詞，譯成中文後在括號附上英文原文，例如「韁繩（Reins）」；不確定怎麼翻的就保留英文。
-3. 日期時間一律換算成台灣時間（UTC+8），格式如「10/13（二）08:00–10:00」。美國太平洋時間要依日期判斷是 PDT（UTC-7）還是 PST（UTC-8）；文字中沒寫時區的時間視為美國太平洋時間。tomorrow、tonight、next week 等相對時間依「發布時間」推算。
-4. 公告提到需要更新遊戲（update the client/game、patch、restart Steam 等）時，第一行加上「⚠️ 需要更新遊戲」。
-5. 圖片中有文字（例如更新路線圖、維護時間）時，一併翻譯並整理成條列重點；圖片中的日期沒有時區時，照原文保留並註明「（官方未註明時區）」。
-6. 移除 @everyone、@here，不要產生任何 @ 提及；網址原樣保留。
-7. 只輸出翻譯結果，不要加任何說明、前言或程式碼區塊。
+2. 必須遵守下方術語表。術語表只在該詞作為遊戲專有名詞時套用；一般英文用法（例如 grand prize、top tier、boss fight 的一般敘述）照正常語意翻譯。
+3. 術語表裡已有的詞直接用中文譯名，不要再加英文括號。只有術語表沒有的遊戲專有名詞，才譯成中文後在括號附上英文原文，格式為「中文（English）」，例如「狼人毛皮（Werewolf Pelts）」；不確定怎麼翻的就保留英文。
+4. 日期時間一律換算成台灣時間（UTC+8），格式如「10/13（二）08:00–10:00」。美國太平洋時間要依日期判斷是 PDT（UTC-7）還是 PST（UTC-8）；文字中沒寫時區的時間視為美國太平洋時間。tomorrow、tonight、next week 等相對時間依「發布時間」推算。
+5. 公告提到需要更新遊戲（update the client/game、patch、restart Steam 等）時，第一行加上「⚠️ 需要更新遊戲」。
+6. 圖片中有文字（例如更新路線圖、維護時間）時，一併翻譯並整理成條列重點；圖片中的日期沒有時區時，照原文保留並註明「（官方未註明時區）」。
+7. 結尾的客套語（Cheers!、Have fun!、Thanks! 等）譯成自然的「祝遊戲愉快！」或直接省略，不要譯成「加油！」。
+8. 移除 @everyone、@here，不要產生任何 @ 提及；網址原樣保留。
+9. 只輸出翻譯結果，不要加任何說明、前言或程式碼區塊。
 
 術語表（英文 → 中文譯名）：
 PROMPT
@@ -63,26 +72,44 @@ commit_if_changed() {
   git push -q
 }
 
-# 下載圖片（最多 MAX_IMAGES 張，超過 4MB 略過），成功的寫入 $WORK/imgN.b64 與 $WORK/imgN.mime
+# 下載圖片（最多 MAX_IMAGES 張），長邊超過 1500px 的縮小並一律轉成 JPEG（GIF 只取第一格）；
+# base64 後超過 4.5MB 的略過。成功的寫入 $WORK/imgN.b64 與 $WORK/imgN.mime
 # stdout 輸出成功的編號，log 走 stderr
 download_images() {  # $@=圖片網址
-  local k=0 url mime
+  local k=0 url mime dims size
   rm -f "$WORK"/img*
+  [[ $# -gt 0 && -z "$IM" ]] && echo "  找不到 ImageMagick（magick/convert），略過縮圖、照原圖送" >&2
   for url in "$@"; do
     k=$((k + 1))
-    if ! mime=$(curl -fsSL --max-time 30 --max-filesize "$IMG_MAX_BYTES" -o "$WORK/img$k" -w '%{content_type}' "$url"); then
-      echo "  圖片 $k 下載失敗或超過 4MB，略過" >&2; continue
+    if ! mime=$(curl -fsSL --max-time 30 --max-filesize "$DOWNLOAD_MAX_BYTES" -o "$WORK/img$k.orig" -w '%{content_type}' "$url"); then
+      echo "  圖片 $k 下載失敗或超過 20MB，略過" >&2; continue
     fi
     mime=${mime%%;*}
-    if (($(stat -c%s "$WORK/img$k") > IMG_MAX_BYTES)); then
-      echo "  圖片 $k 超過 4MB，略過" >&2; continue
-    fi
     if [[ "$mime" != image/* ]]; then
       echo "  圖片 $k 類型為 ${mime:-未知}，略過" >&2; continue
     fi
+    dims="未縮圖"
+    cp "$WORK/img$k.orig" "$WORK/img$k"
+    if [[ -n "$IM" ]]; then
+      dims=$("$IM" "$WORK/img$k.orig[0]" -format '%wx%h' info: 2>/dev/null || echo "尺寸未知")
+      # [0] 只取第一格（GIF）；透明背景補白色；'>' 只縮不放大
+      if "$IM" "$WORK/img$k.orig[0]" -background white -flatten -resize "${IMG_MAX_SIDE}x${IMG_MAX_SIDE}>" \
+        -quality 85 "jpg:$WORK/img$k.jpg" 2>/dev/null; then
+        mv "$WORK/img$k.jpg" "$WORK/img$k"
+        mime=image/jpeg
+        dims+=" → $("$IM" "$WORK/img$k" -format '%wx%h' info: 2>/dev/null || echo "尺寸未知")"
+      else
+        echo "  圖片 $k 縮圖失敗，照原圖送" >&2
+        dims+="（縮圖失敗）"
+      fi
+    fi
     base64 -w0 "$WORK/img$k" > "$WORK/img$k.b64"
+    size=$(stat -c%s "$WORK/img$k.b64")
+    if ((size > B64_MAX_BYTES)); then
+      echo "  圖片 $k（$dims，base64 $size bytes）超過 4.5MB，略過" >&2; continue
+    fi
     printf '%s' "$mime" > "$WORK/img$k.mime"
-    echo "  圖片 $k（$mime，$(stat -c%s "$WORK/img$k") bytes）送翻譯" >&2
+    echo "  圖片 $k（$dims，$mime，base64 $size bytes）送翻譯" >&2
     echo "$k"
   done
 }
@@ -161,14 +188,28 @@ translate() {  # $1=原文 $2=發布時間 ISO 8601 $3...=已下載圖片編號
 
 post() {  # $1=標題 $2=內文 $3=發布時間 $4=原圖網址（可空）$5=翻譯供應商（可空）
   local footer="原文發布：$(TZ=Asia/Taipei date -d "$3" '+%Y-%m-%d %H:%M')（台灣時間）"
+  local user=$USERNAME desc=$2 color=null webhook=$DISCORD_WEBHOOK_URL
   [[ -n "${5:-}" ]] && footer+=" · 翻譯：$5"
-  jq -n --arg u "$USERNAME" --arg t "$1" --arg d "$2" --arg f "$footer" --arg img "${4:-}" '{
+  # 預覽一律用測試格式（灰色、標註測試），與正式公告區分
+  if [[ "$is_preview" == true ]]; then
+    user="$USERNAME（測試）"
+    desc="⚠️ 這是測試翻譯，不是新的官方公告"$'\n\n'"$2"
+    color=$PREVIEW_COLOR
+    if [[ "${PREVIEW_TARGET:-test}" != main && -n "${DISCORD_TEST_WEBHOOK_URL:-}" ]]; then
+      webhook=$DISCORD_TEST_WEBHOOK_URL
+      echo "  預覽發送到測試 Webhook"
+    else
+      echo "  預覽發送到主 Webhook"
+    fi
+  fi
+  jq -n --arg u "$user" --arg t "$1" --arg d "$desc" --arg f "$footer" --arg img "${4:-}" --argjson c "$color" '{
       username: $u,
       allowed_mentions: {parse: []},
       embeds: [{title: $t, description: (if ($d | length) > 3500 then $d[0:3500] + "…" else $d end), footer: {text: $f}}
-        + (if $img != "" then {image: {url: $img}} else {} end)]
+        + (if $img != "" then {image: {url: $img}} else {} end)
+        + (if $c != null then {color: $c} else {} end)]
     }' |
-    curl -fsS --retry 3 --max-time 20 -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK_URL" >/dev/null
+    curl -fsS --retry 3 --max-time 20 -H 'Content-Type: application/json' -d @- "$webhook" >/dev/null
 }
 
 # 只處理一般訊息（type 0）與回覆（type 19），追蹤頻道等系統訊息視為空內容
@@ -227,8 +268,9 @@ process() {  # $1=標題 $2=是否更新狀態
 }
 
 if [[ -n "${PREVIEW_TEXT:-}" ]]; then
+  is_preview=true
   echo "預覽指定文字：$(jq -rn --arg t "$PREVIEW_TEXT" '$t | gsub("\\s+"; " ") | .[0:50]')"
-  forward "📢 官方公告（預覽）" "$(sed -E 's/@(everyone|here)//g' <<<"$PREVIEW_TEXT")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
+  forward "$PREVIEW_TITLE" "$(sed -E 's/@(everyone|here)//g' <<<"$PREVIEW_TEXT")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
     { echo "::error::推播預覽失敗"; exit 1; }
   exit 0
 fi
@@ -237,10 +279,17 @@ fi
 : "${ANNOUNCE_CHANNEL_ID:?ANNOUNCE_CHANNEL_ID 未設定}"
 
 if [[ "${PREVIEW:-false}" == true ]]; then
-  fetch "limit=20"
-  msgs=$(jq "map(select(($extract) != \"\" or ($images | length) > 0)) | $sort_old_first | .[-2:]" <<<"$msgs")
-  [[ $(jq length <<<"$msgs") -eq 0 ]] && echo "頻道內沒有可預覽的公告（系統訊息不算）"
-  process "📢 官方公告（預覽）" false
+  is_preview=true
+  if [[ -n "${PREVIEW_MESSAGE_ID:-}" ]]; then
+    fetch "around=${PREVIEW_MESSAGE_ID}&limit=1"
+    msgs=$(jq --arg id "$PREVIEW_MESSAGE_ID" 'map(select(.id == $id))' <<<"$msgs")
+    [[ $(jq length <<<"$msgs") -eq 0 ]] && echo "找不到訊息 $PREVIEW_MESSAGE_ID"
+  else
+    fetch "limit=20"
+    msgs=$(jq "map(select(($extract) != \"\" or ($images | length) > 0)) | $sort_old_first | .[-2:]" <<<"$msgs")
+    [[ $(jq length <<<"$msgs") -eq 0 ]] && echo "頻道內沒有可預覽的公告（系統訊息不算）"
+  fi
+  process "$PREVIEW_TITLE" false
   exit
 fi
 
