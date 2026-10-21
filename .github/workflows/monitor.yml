@@ -19,6 +19,10 @@ on:
         description: "預覽官方公告翻譯（翻譯最新 2 則並發送，不更新 state.json）"
         type: boolean
         default: false
+      preview_text:
+        description: "預覽翻譯指定文字（有填就只翻這段並發送，不讀頻道、不更新 state.json）"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -44,7 +48,10 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           ANNOUNCE_CHANNEL_ID: ${{ secrets.ANNOUNCE_CHANNEL_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           PREVIEW: ${{ inputs.preview_announce == true }}
+          PREVIEW_TEXT: ${{ inputs.preview_text }}
         run: bash .github/scripts/announce.sh
