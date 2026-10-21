@@ -19,7 +19,7 @@ PREVIEW_TITLE="🧪 測試訊息（請忽略）"
 PREVIEW_COLOR=$((0x95A5A6))
 is_preview=false
 WORK=$(mktemp -d)
-IM=$(command -v magick || command -v convert || true)
+IM=""  # ImageMagick 指令，有圖片要送時才由 ensure_im 偵測／安裝
 
 : "${DISCORD_WEBHOOK_URL:?DISCORD_WEBHOOK_URL 未設定}"
 
@@ -72,13 +72,30 @@ commit_if_changed() {
   git push -q
 }
 
+# 找 ImageMagick；沒有就安裝（同一次執行只嘗試一次，失敗不中斷，照原圖送）
+ensure_im() {
+  IM=$(command -v magick || command -v convert || true)
+  [[ -n "$IM" || -f "$WORK/im_install_tried" ]] && return 0
+  touch "$WORK/im_install_tried"
+  echo "  找不到 ImageMagick，安裝中（apt-get install imagemagick）" >&2
+  if sudo apt-get install -y --no-install-recommends imagemagick > "$WORK/apt.log" 2>&1; then
+    IM=$(command -v magick || command -v convert || true)
+    echo "  ImageMagick 安裝完成：${IM:-安裝後仍找不到指令}" >&2
+  else
+    echo "  ImageMagick 安裝失敗，照原圖送：$(tail -n 3 "$WORK/apt.log" | tr '\n' ' ')" >&2
+  fi
+}
+
 # 下載圖片（最多 MAX_IMAGES 張），長邊超過 1500px 的縮小並一律轉成 JPEG（GIF 只取第一格）；
 # base64 後超過 4.5MB 的略過。成功的寫入 $WORK/imgN.b64 與 $WORK/imgN.mime
 # stdout 輸出成功的編號，log 走 stderr
 download_images() {  # $@=圖片網址
   local k=0 url mime dims size
   rm -f "$WORK"/img*
-  [[ $# -gt 0 && -z "$IM" ]] && echo "  找不到 ImageMagick（magick/convert），略過縮圖、照原圖送" >&2
+  if [[ $# -gt 0 ]]; then
+    ensure_im
+    [[ -z "$IM" ]] && echo "  沒有 ImageMagick（magick/convert），略過縮圖、照原圖送" >&2
+  fi
   for url in "$@"; do
     k=$((k + 1))
     if ! mime=$(curl -fsSL --max-time 30 --max-filesize "$DOWNLOAD_MAX_BYTES" -o "$WORK/img$k.orig" -w '%{content_type}' "$url"); then
@@ -188,13 +205,14 @@ translate() {  # $1=原文 $2=發布時間 ISO 8601 $3...=已下載圖片編號
 
 post() {  # $1=標題 $2=內文 $3=發布時間 $4=原圖網址（可空）$5=翻譯供應商（可空）
   local footer="原文發布：$(TZ=Asia/Taipei date -d "$3" '+%Y-%m-%d %H:%M')（台灣時間）"
-  local user=$USERNAME desc=$2 color=null webhook=$DISCORD_WEBHOOK_URL
+  local user=$USERNAME desc=$2 color=null flags=null webhook=$DISCORD_WEBHOOK_URL
   [[ -n "${5:-}" ]] && footer+=" · 翻譯：$5"
   # 預覽一律用測試格式（灰色、標註測試），與正式公告區分
   if [[ "$is_preview" == true ]]; then
     user="$USERNAME（測試）"
     desc="⚠️ 這是測試翻譯，不是新的官方公告"$'\n\n'"$2"
     color=$PREVIEW_COLOR
+    flags=4096  # SUPPRESS_NOTIFICATIONS：靜音、不推播
     if [[ "${PREVIEW_TARGET:-test}" != main && -n "${DISCORD_TEST_WEBHOOK_URL:-}" ]]; then
       webhook=$DISCORD_TEST_WEBHOOK_URL
       echo "  預覽發送到測試 Webhook"
@@ -202,13 +220,13 @@ post() {  # $1=標題 $2=內文 $3=發布時間 $4=原圖網址（可空）$5=�
       echo "  預覽發送到主 Webhook"
     fi
   fi
-  jq -n --arg u "$user" --arg t "$1" --arg d "$desc" --arg f "$footer" --arg img "${4:-}" --argjson c "$color" '{
+  jq -n --arg u "$user" --arg t "$1" --arg d "$desc" --arg f "$footer" --arg img "${4:-}" --argjson c "$color" --argjson fl "$flags" '{
       username: $u,
       allowed_mentions: {parse: []},
       embeds: [{title: $t, description: (if ($d | length) > 3500 then $d[0:3500] + "…" else $d end), footer: {text: $f}}
         + (if $img != "" then {image: {url: $img}} else {} end)
         + (if $c != null then {color: $c} else {} end)]
-    }' |
+    } + (if $fl != null then {flags: $fl} else {} end)' |
     curl -fsS --retry 3 --max-time 20 -H 'Content-Type: application/json' -d @- "$webhook" >/dev/null
 }
 

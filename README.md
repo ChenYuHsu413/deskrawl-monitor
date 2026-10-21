@@ -130,7 +130,8 @@ repo 根目錄的 `glossary.json` 是 `{"英文術語": "中文譯名"}` 格式�
 - 讀取 Discord 頻道失敗只會在 log 記錯誤，不會發通知。
 - 支援 Discord「轉發」的訊息（內容在 `message_snapshots`）與追蹤功能轉來的訊息；系統訊息（例如追蹤頻道的提示）會跳過。
 - 圖片公告：訊息（含轉發內容、embed）中的圖片最多取 2 張，連同文字送給翻譯模型翻譯圖中文字；通知的 embed 會附上原圖網址。
-  - 送出前用 runner 內建的 ImageMagick 把長邊超過 1500px 的圖縮到 1500px（不放大），一律轉成 JPEG（品質 85，GIF 只取第一格）；找不到 ImageMagick 就照原圖送。
+  - 送出前用 ImageMagick 把長邊超過 1500px 的圖縮到 1500px（不放大），一律轉成 JPEG（品質 85，GIF 只取第一格）。
+  - runner 沒有預裝 ImageMagick：只有在這次要送翻譯的訊息帶圖片時才 `apt-get install`（同一次執行只裝一次）；沒有圖片的執行不安裝。安裝失敗不會讓 workflow 失敗，改照原圖送並記 log。
   - base64 編碼後超過 4.5MB 的圖片略過。log 會記錄原始尺寸、縮圖後尺寸與 base64 大小。
 - log 會列出每則訊息的 ID、type、flags、是否轉發、內容前 50 字與處理結果；Claude／Gemini 失敗時會印出 HTTP 狀態碼與錯誤訊息（不會印出 key）。
 - 發送時設定 `allowed_mentions: {"parse": []}`，並移除 `@everyone`、`@here`，不會 @ 到任何人。
@@ -147,5 +148,6 @@ Actions → **Monitor Steam Build** → **Run workflow**，依需求填：
 | **preview_target** | `test`（預設）：發到 `DISCORD_TEST_WEBHOOK_URL`，未設定則發到主 Webhook；`main`：強制發到主 Webhook |
 
 預覽**不會**更新 `state.json`，且一律以測試格式發送，與正式公告區分：
-標題「🧪 測試訊息（請忽略）」、灰色 embed、內文第一行「⚠️ 這是測試翻譯，不是新的官方公告」、發送者名稱「桌面破壞神更新監控（測試）」。
+標題「🧪 測試訊息（請忽略）」、灰色 embed、內文第一行「⚠️ 這是測試翻譯，不是新的官方公告」、發送者名稱「桌面破壞神更新監控（測試）」，
+並以靜音訊息發送（`flags: 4096`，不推播通知）。
 正式公告的格式不受影響。
